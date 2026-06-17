@@ -4,7 +4,7 @@
 
 This project demonstrates register-level programming on the ESP32 using direct memory-mapped peripheral access rather than high-level frameworks such as Arduino.
 
-The application is developed and built using ESP-IDF, executed inside QEMU, and validated through UART output. GPIO and UART peripherals are controlled directly through hardware registers, providing a closer look at embedded systems development and ESP32 architecture.
+The application is developed and built using ESP-IDF, executed inside QEMU or flashed to physical hardware, and validated through UART output. GPIO and UART peripherals are controlled directly through hardware registers, providing a closer look at embedded systems development and ESP32 architecture.
 
 The project was developed inside WSL2 and uses the Xtensa toolchain supplied by ESP-IDF.
 
@@ -17,6 +17,7 @@ The project was developed inside WSL2 and uses the Xtensa toolchain supplied by 
 * Bare-metal style programming
 * ESP-IDF build system integration
 * QEMU-based execution
+* Physical ESP32 hardware flashing
 * Flash image generation using esptool.py
 * UART-based runtime validation
 
@@ -32,7 +33,8 @@ Windows
     ├── ESP-IDF
     ├── Xtensa Toolchain
     ├── esptool.py
-    └── QEMU
+    ├── QEMU
+    └── Physical ESP32 (optional)
             │
             └── ESP32 Firmware
                     │
@@ -164,6 +166,7 @@ Used in this project to:
 * Merge binaries
 * Create flash images
 * Validate image layout
+* Flash physical hardware
 
 ### QEMU
 
@@ -314,6 +317,183 @@ Implements application behavior:
 
 ---
 
+## Final Source Code
+
+### main/esp32_regs.h
+
+```c
+#ifndef ESP32_REGS_H
+#define ESP32_REGS_H
+
+#include <stdint.h>
+
+/* GPIO Matrix registers */
+#define GPIO_ENABLE_REG     (*(volatile uint32_t *)0x3FF44020)
+#define GPIO_ENABLE_W1TS    (*(volatile uint32_t *)0x3FF44024)
+#define GPIO_OUT_REG        (*(volatile uint32_t *)0x3FF44004)
+#define GPIO_OUT_W1TS_REG   (*(volatile uint32_t *)0x3FF44008)
+#define GPIO_OUT_W1TC_REG   (*(volatile uint32_t *)0x3FF4400C)
+#define GPIO_IN_REG         (*(volatile uint32_t *)0x3FF4403C)
+
+/* UART0 registers */
+#define UART0_BASE          0x3FF40000
+#define UART_FIFO_REG       (*(volatile uint32_t *)(UART0_BASE + 0x00))
+#define UART_STATUS_REG     (*(volatile uint32_t *)(UART0_BASE + 0x1C))
+#define UART_CLKDIV_REG     (*(volatile uint32_t *)(UART0_BASE + 0x14))
+#define UART_CONF0_REG      (*(volatile uint32_t *)(UART0_BASE + 0x20))
+
+#define GPIO2_BIT           (1U << 2)
+
+#endif /* ESP32_REGS_H */
+```
+
+### main/gpio.c
+
+```c
+#include "esp32_regs.h"
+
+void gpio_init_output(int pin) {
+    /* GPIO2 IO MUX register is at 0x3FF49040 */
+    /* MCU_SEL (function select) is bits 12-14, value 2 = GPIO function */
+    volatile uint32_t *iomux = (volatile uint32_t *)0x3FF49040;
+    *iomux = (2 << 12);  /* PIN_FUNC_GPIO = 2 */
+
+    /* GPIO Matrix: route GPIO peripheral output to pin 2 */
+    /* GPIO_FUNCn_OUT_SEL_CFG_REG base: 0x3FF44530, 4 bytes per pin */
+    /* GPIO2 register: 0x3FF44530 + 2*4 = 0x3FF44538 */
+    /* Value 0x100 (256) = select GPIO_OUT_REG[2] as source */
+    volatile uint32_t *func_out_sel = (volatile uint32_t *)0x3FF44538;
+    *func_out_sel = 0x100;
+
+    GPIO_ENABLE_W1TS = (1U << pin);
+}
+
+void gpio_set(int pin) {
+    GPIO_OUT_W1TS_REG = (1U << pin);
+}
+
+void gpio_clear(int pin) {
+    GPIO_OUT_W1TC_REG = (1U << pin);
+}
+```
+
+### main/uart.c
+
+```c
+#include "esp32_regs.h"
+
+void uart_init(void) {
+    /* Bootloader already configured UART0 at 115200 baud. */
+    /* No reconfiguration needed for bare-metal output. */
+}
+
+void uart_putc(char c) {
+    while (UART_STATUS_REG & 0x00400000);  /* Wait while TX FIFO full */
+    UART_FIFO_REG = c;
+}
+
+void uart_puts(const char *s) {
+    while (*s) {
+        uart_putc(*s++);
+    }
+}
+```
+
+### main/main.c
+
+```c
+#include <stdint.h>
+#include "esp32_regs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+void gpio_init_output(int pin);
+void gpio_set(int pin);
+void gpio_clear(int pin);
+void uart_init(void);
+void uart_puts(const char *s);
+
+#define QUICK_MS    200
+#define LONG_MS     800
+#define HOLD_MS     2000
+
+void delay_ms(uint32_t ms) {
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+void blink_quick(void) {
+    gpio_set(2);
+    delay_ms(QUICK_MS);
+    gpio_clear(2);
+    delay_ms(QUICK_MS);
+}
+
+void blink_long(void) {
+    gpio_set(2);
+    delay_ms(LONG_MS);
+    gpio_clear(2);
+    delay_ms(LONG_MS);
+}
+
+void hold_steady(void) {
+    gpio_set(2);
+    delay_ms(HOLD_MS);
+    gpio_clear(2);
+    delay_ms(HOLD_MS);
+}
+
+void app_main(void) {
+    uart_init();
+    gpio_init_output(2);
+
+    uart_puts("
+=== ESP32 QEMU Bare-Metal ===
+");
+    uart_puts("Pattern: 2 quick -> 2 long -> 2s on -> 2s off
+");
+    uart_puts("================================
+
+");
+
+    while (1) {
+        uart_puts("CYCLE START
+");
+
+        blink_quick();
+        blink_quick();
+        uart_puts("  2 quick done
+");
+
+        blink_long();
+        blink_long();
+        uart_puts("  2 long done
+");
+
+        hold_steady();
+        uart_puts("  hold done
+
+");
+    }
+}
+```
+
+### Root CMakeLists.txt
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(esp32_qemu_lab)
+```
+
+### main/CMakeLists.txt
+
+```cmake
+idf_component_register(SRCS "main.c" "gpio.c" "uart.c"
+                    INCLUDE_DIRS ".")
+```
+
+---
+
 ## Building the Project
 
 Build using ESP-IDF:
@@ -332,7 +512,9 @@ main.bin
 
 ---
 
-## Creating the Flash Image
+## Running in QEMU
+
+### Create the QEMU Flash Image
 
 Merge the generated binaries into a single ESP32 flash image:
 
@@ -347,19 +529,11 @@ esptool.py --chip esp32 merge_bin \
     0x1000 build/bootloader/bootloader.bin \
     0x8000 build/partition_table/partition-table.bin \
     0x10000 build/main.bin
-```
 
-Resize image to match flash size:
-
-```bash
 truncate -s 4M build/qemu_flash.bin
 ```
 
----
-
-## Running in QEMU
-
-Launch the emulator:
+### Launch QEMU
 
 ```bash
 qemu-system-xtensa -nographic \
@@ -369,9 +543,73 @@ qemu-system-xtensa -nographic \
     -global driver=timer.esp32.timg,property=wdt_disable,value=true
 ```
 
+To stop QEMU, press **Ctrl+A** then **X**. If you need the monitor, press **Ctrl+A** then **C** and type `quit`.
+
+---
+
+## Flashing to Physical ESP32 Hardware
+
+### Prerequisites
+
+* Physical ESP32 dev board (e.g., ESP32-DevKitC, ESP32-WROOM-32)
+* USB cable (data-capable, not charge-only)
+* USB-to-UART bridge drivers installed on host (CP210x, CH340, or FTDI)
+
+### WSL2 USB Setup
+
+WSL2 does not natively expose USB serial devices. Install `usbipd` on Windows to attach the ESP32 to WSL2.
+
+**Install usbipd on Windows (PowerShell as Administrator):**
+
+```powershell
+winget install --interactive --exact dorssel.usbipd-win
+```
+
+**Attach ESP32 to WSL2:**
+
+```powershell
+usbipd list
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+**Inside WSL2, grant port permissions:**
+
+```bash
+sudo chmod 666 /dev/ttyUSB0
+```
+
+**Permanent fix (add user to dialout group):**
+
+```bash
+sudo usermod -a -G dialout $USER
+```
+
+Log out and back in for the group change to take effect.
+
+### Build and Flash
+
+```bash
+cd ~/esp32-qemu-lab
+idf.py set-target esp32
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
+
+To re-flash, put the board into download mode:
+1. Hold **BOOT** button
+2. Press and release **EN** (RESET)
+3. Release **BOOT**
+
+### Exit Monitor
+
+Press **Ctrl+]** to exit `idf.py monitor`.
+
 ---
 
 ## Expected Output
+
+### QEMU Output
 
 ```text
 === ESP32 QEMU Bare-Metal ===
@@ -386,6 +624,10 @@ CYCLE START
 
 The output should continuously repeat.
 
+### Physical Hardware Output
+
+The onboard LED on GPIO2 will blink: **2 quick → 2 long → 2s on → 2s off → repeat**. UART output at 115200 baud shows the same messages as QEMU.
+
 ---
 
 ## Validation
@@ -395,7 +637,10 @@ The project was validated through:
 * Successful ESP-IDF compilation
 * Successful flash image generation
 * Successful ESP32 boot within QEMU
-* UART output verification
+* UART output verification in QEMU
+* Successful flashing to physical ESP32-D0WD-V3
+* UART output verification on physical hardware
+* LED blink pattern verification on physical hardware
 * Continuous execution of the programmed pattern
 
 Validation Commands:
@@ -414,37 +659,51 @@ qemu-system-xtensa --version
 
 Initial environment configuration issues prevented the compiler from being detected.
 
-Solution:
-
-Configured ESP-IDF exports and added permanent environment initialization through `.bashrc`.
+**Solution:** Configured ESP-IDF exports and added permanent environment initialization through `.bashrc`.
 
 ### Invalid Flash Image Layout
 
 QEMU rejected early flash images due to incorrect binary placement.
 
-Solution:
-
-Used `esptool.py merge_bin` with the proper ESP32 flash offsets.
+**Solution:** Used `esptool.py merge_bin` with the proper ESP32 flash offsets.
 
 ### Bare-Metal Linker Issues
 
 Custom startup and linker configurations caused build instability.
 
-Solution:
-
-Migrated to an ESP-IDF Minimal Project architecture while preserving direct register-level programming.
+**Solution:** Migrated to an ESP-IDF Minimal Project architecture while preserving direct register-level programming.
 
 ### QEMU Serial Conflict
 
 QEMU monitor and UART attempted to share standard input/output.
 
-Solution:
+**Solution:** Used `-serial mon:stdio`.
 
-Used:
+### Watchdog Timer Resets on Physical Hardware
+
+The ESP32's Task Watchdog and Interrupt Watchdog triggered resets during the blocking delay loop.
+
+**Solution:** Disabled watchdogs in `sdkconfig`:
 
 ```bash
--serial mon:stdio
+# In sdkconfig
+# CONFIG_ESP_INT_WDT is not set
+# CONFIG_ESP_TASK_WDT_EN is not set
 ```
+
+### GPIO Register Address Bug on Physical Hardware
+
+A wrong GPIO Matrix register address (`0x3FF44554` instead of `0x3FF44538`) caused the firmware to write to `GPIO_FUNC9_OUT_SEL_CFG_REG`, which is connected to the on-board SPI flash chip. This severed the flash connection and crashed the chip immediately after `app_main()` started, producing no UART output and no LED blink.
+
+**Root Cause:** QEMU does not simulate the physical GPIO9-to-flash wiring, so the same bug was harmless in emulation but fatal on silicon.
+
+**Solution:** Corrected the GPIO Matrix base address to `0x3FF44530` and calculated the pin offset as `base + pin * 4`. Also fixed the IO MUX `MCU_SEL` field to bits 12-14 with value `2` for GPIO function (`PIN_FUNC_GPIO`).
+
+### UART Baud Rate Configuration
+
+The UART clock divisor register format differs between QEMU's forgiving emulation and real hardware.
+
+**Solution:** The bootloader already configures UART0 correctly at 115200 baud. Bare-metal UART output works without reinitialization by using the bootloader's existing configuration.
 
 ---
 
