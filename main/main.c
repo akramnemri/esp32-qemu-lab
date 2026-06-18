@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include "esp32_regs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 void gpio_init_output(int pin);
 void gpio_set(int pin);
@@ -12,10 +14,7 @@ void uart_puts(const char *s);
 #define HOLD_MS     2000
 
 void delay_ms(uint32_t ms) {
-    uint32_t cycles = ms * 240000;
-    while (cycles--) {
-        __asm__ volatile ("nop");
-    }
+    vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
 void blink_quick(void) {
@@ -40,24 +39,24 @@ void hold_steady(void) {
 }
 
 void app_main(void) {
-    uart_init();
+    // uart_init();  // Bootloader already configured UART0
     gpio_init_output(2);
-    
+
     uart_puts("\r\n=== ESP32 QEMU Bare-Metal ===\r\n");
     uart_puts("Pattern: 2 quick -> 2 long -> 2s on -> 2s off\r\n");
     uart_puts("================================\r\n\r\n");
-    
+
     while (1) {
         uart_puts("CYCLE START\r\n");
-        
+
         blink_quick();
         blink_quick();
         uart_puts("  2 quick done\r\n");
-        
+
         blink_long();
         blink_long();
         uart_puts("  2 long done\r\n");
-        
+
         hold_steady();
         uart_puts("  hold done\r\n\r\n");
     }
