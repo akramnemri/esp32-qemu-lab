@@ -122,9 +122,11 @@ In QEMU and on hardware, the program prints a repeating UART message sequence an
 ## Troubleshooting
 
 - `xtensa-esp-elf-gcc` or `idf.py` not found: re-run `source ~/esp/esp-idf/export.sh`
-- `qemu-system-xtensa: unsupported machine type`: make sure you are using the ESP32-enabled QEMU from ESP-IDF tools, not only the generic Ubuntu package
+- `qemu-system-xtensa` not found: install the recommended package with `sudo apt install qemu-system-misc`, then verify with `qemu-system-xtensa --version`
+- `qemu-system-xtensa: unsupported machine type`: make sure you are using the ESP32-enabled QEMU from ESP-IDF tools, not only the generic Ubuntu package; then run `python tools/idf_tools.py install qemu-xtensa` from `~/esp/esp-idf`
 - `Could not open build/qemu_flash.bin`: run QEMU from the project root
 - No output in QEMU: confirm the flash image was created with `merge_bin` and padded to 4 MB
+- Build outputs missing: verify that `idf.py build` completed successfully and that these files exist: `build/bootloader/bootloader.bin`, `build/partition_table/partition-table.bin`, and `build/main.bin`
 - No serial device in WSL2: attach the board with `usbipd` and confirm `/dev/ttyUSB0`
 
 ## Author
